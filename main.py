@@ -3,11 +3,6 @@
 Rule34 Discord Bot - Railway/GitHub Deploy
 Commands:
   !rule34 <tags> [-count:N] [-exclude:tag1,tag2]
-  
-  Tags: space-separated tags to include
-  -count:N : number of images to send (1-15, default 1)
-  -exclude:tag1,tag2 : tags to exclude
-  -<tag> : alternative way to exclude a single tag
 """
 
 import discord
@@ -16,7 +11,9 @@ import asyncio
 import random
 import os
 import sys
+import json
 import xml.etree.ElementTree as ET
+from urllib.parse import urlencode
 
 # ========= CONFIGURATION =========
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -25,6 +22,11 @@ R34_USER_ID = os.environ.get("R34_USER_ID", "")
 
 if not DISCORD_TOKEN:
     print("[-] ERROR: DISCORD_TOKEN environment variable not set!")
+    sys.exit(1)
+
+if not R34_API_KEY or not R34_USER_ID:
+    print("[-] ERROR: R34_API_KEY and R34_USER_ID environment variables must be set!")
+    print("[-] Get them from: https://rule34.xxx/index.php?page=account&s=options")
     sys.exit(1)
 
 R34_API = "https://api.rule34.xxx/index.php"
@@ -77,12 +79,12 @@ def build_tags_string(include_tags: list, exclude_tags: list) -> str:
 
 
 async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclude_tags: list, count: int):
-    """Fetch posts from the Rule34 API."""
+    """Fetch posts from the Rule34 API with auth."""
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     valid_urls = []
-
     limit = min(100, count * 5)
 
+    # Build params with auth
     params = {
         "page": "dapi",
         "s": "post",
@@ -90,45 +92,54 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
         "tags": build_tags_string(include_tags, exclude_tags),
         "limit": str(limit),
         "json": "1",
+        "api_key": R34_API_KEY,
+        "user_id": R34_USER_ID,
     }
 
-    # Add API key auth if configured
-    if R34_API_KEY and R34_USER_ID:
-        params["api_key"] = R34_API_KEY
-        params["user_id"] = R34_USER_ID
+    full_url = f"{R34_API}?{urlencode(params)}"
+
+    print(f"[DEBUG] Fetching: {R34_API} with tags='{params['tags']}' api_key={'***' if R34_API_KEY else 'NONE'}")
 
     try:
         async with session.get(
             R34_API, params=params, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         ) as resp:
-            if resp.status != 200:
-                return None, f"API returned HTTP {resp.status}"
-
             text = await resp.text()
             text = text.strip()
 
-            # If the response is a JSON string (starts with [ or {)
+            print(f"[DEBUG] API response status: {resp.status}")
+            print(f"[DEBUG] API response (first 200 chars): {text[:200]}")
+
+            if resp.status != 200:
+                return None, f"API returned HTTP {resp.status}: {text[:100]}"
+
+            # Check for auth error
+            if "Missing authentication" in text:
+                return None, "Rule34 API rejected authentication. Check your R34_API_KEY and R34_USER_ID."
+
+            # Try JSON first
             if text.startswith("[") or text.startswith("{"):
-                import json
-                data = json.loads(text)
-                
-                # Handle {"posts": [...]} wrapper or plain array
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    return None, f"API returned invalid JSON: {e}"
+
                 if isinstance(data, dict):
-                    posts_list = data.get("posts", [])
-                    # Some responses have posts.post (nested)
-                    if isinstance(posts_list, dict) and "post" in posts_list:
-                        posts_list = posts_list["post"]
+                    # Handle {"posts": [...]} or {"posts": {"post": [...]}}
+                    posts_data = data.get("posts", [])
+                    if isinstance(posts_data, dict):
+                        posts_list = posts_data.get("post", [])
+                    else:
+                        posts_list = posts_data
                 else:
                     posts_list = data
 
                 if not posts_list:
-                    return None, "No results found for those tags."
+                    return None, "Rule34 returned no posts for those tags. Check spelling."
 
                 for post in posts_list:
-                    # Handle both direct dict and @attributes wrapping
                     if isinstance(post, dict) and "@attributes" in post:
                         post = post["@attributes"]
-                    
                     file_url = post.get("file_url", "")
                     if not file_url:
                         continue
@@ -137,9 +148,14 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                         valid_urls.append(file_url)
                     if len(valid_urls) >= count:
                         break
+
             else:
-                # Parse XML
-                root = ET.fromstring(text)
+                # Try XML
+                try:
+                    root = ET.fromstring(text)
+                except ET.ParseError as e:
+                    return None, f"API returned unexpected data: {text[:200]}"
+
                 for post in root.iter("post"):
                     file_url = post.get("file_url", "")
                     if not file_url:
@@ -151,13 +167,11 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                         break
 
         if not valid_urls:
-            return None, f"No static images found for tags: {' '.join(include_tags)}. Try different tags."
+            return None, f"No static images found for tags: {' '.join(include_tags)}."
 
         random.shuffle(valid_urls)
         return valid_urls[:count], None
 
-    except ET.ParseError as e:
-        return None, f"Failed to parse API response: {e}"
     except asyncio.TimeoutError:
         return None, "Request timed out. Try again or use fewer tags."
     except Exception as e:
@@ -166,19 +180,13 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
 
 @bot.event
 async def on_ready():
-    print(f"[+] Logged in as {bot.user} (ID: {bot.user.id})")
-    if R34_API_KEY and R34_USER_ID:
-        print("[+] Rule34 API key configured")
-    else:
-        print("[!] No Rule34 API key set - set R34_API_KEY and R34_USER_ID env vars if needed")
-    print("[+] Bot is ready!")
+    print(f"[+] Logged in as {bot.user}")
 
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
-
     if not message.content.startswith("!rule34"):
         return
 
@@ -187,10 +195,7 @@ async def on_message(message: discord.Message):
     if not args_text:
         await message.channel.send(
             "Usage: `!rule34 <tags> [-count:N] [-exclude:tag1,tag2]`\n"
-            "Examples:\n"
-            "  `!rule34 naruto`\n"
-            "  `!rule34 sonic -count:5 -exclude:guro,scat`\n"
-            "  `!rule34 star_wars -sith -count:3`"
+            "Example: `!rule34 naruto -count:5 -exclude:guro,scat`"
         )
         return
 
@@ -222,7 +227,7 @@ async def on_message(message: discord.Message):
         )
         for i, url in enumerate(urls, 1):
             await message.channel.send(f"**{i}.** {url}")
-            await asyncio.sync.sleep(0.3)
+            await asyncio.sleep(0.3)
 
 
 if __name__ == "__main__":
