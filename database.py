@@ -1,6 +1,6 @@
 import sqlite3
 
-DB_NAME = "game.db"
+DB_NAME = "automod.db"
 
 
 def get_connection():
@@ -13,37 +13,22 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
 
-    # USERS
+    # ---------- USERS ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
-        money INTEGER DEFAULT 0,
-        trust INTEGER DEFAULT 0,
-        rank TEXT DEFAULT 'citizen',
-        job TEXT DEFAULT NULL,
-        last_work_timestamp INTEGER DEFAULT 0,
-        created_at INTEGER DEFAULT (strftime('%s','now'))
+        warns INTEGER DEFAULT 0,
+        last_message_time INTEGER DEFAULT 0
     )
     """)
 
-    # INVENTORY
+    # ---------- WARN LOG ----------
     c.execute("""
-    CREATE TABLE IF NOT EXISTS inventory (
-        item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    CREATE TABLE IF NOT EXISTS warn_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
-        item_name TEXT,
-        value INTEGER,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-    """)
-
-    # STATE (inspection system)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS state (
-        user_id TEXT PRIMARY KEY,
-        is_in_inspection INTEGER DEFAULT 0,
-        inspection_end_time INTEGER DEFAULT 0,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        reason TEXT,
+        timestamp INTEGER
     )
     """)
 
