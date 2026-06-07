@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+PIXABAY_KEY = os.getenv("PIXABAY_KEY")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -11,20 +12,15 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
-# ---------- NSFW GUARD ----------
-def nsfw_only(ctx):
-    return ctx.channel.is_nsfw()
-
-
 # ---------- HELP ----------
 @bot.command()
 async def help(ctx):
     await ctx.send(
-        "**IMAGE BOT**\n"
-        "!image <query> (NSFW channels only)\n"
-        "!cat\n"
-        "!dog\n"
-        "!meme"
+        "**IMAGE BOT COMMANDS**\n"
+        "!image <query> - search images\n"
+        "!cat - random cat\n"
+        "!dog - random dog\n"
+        "!meme - meme image"
     )
 
 
@@ -59,7 +55,7 @@ async def meme(ctx):
             await ctx.send(embed=embed)
 
 
-# ---------- IMAGE SEARCH (NSFW-GATED) ----------
+# ---------- REAL IMAGE SEARCH ----------
 @bot.command()
 async def image(ctx, *, query: str):
 
@@ -67,12 +63,31 @@ async def image(ctx, *, query: str):
         await ctx.send("🔞 This command only works in NSFW-marked channels.")
         return
 
-    # Picsum gives real direct images (no redirects)
-    url = f"https://picsum.photos/seed/{query}/{800}/{600}"
+    url = (
+        "https://pixabay.com/api/"
+        f"?key={PIXABAY_KEY}"
+        f"&q={query}"
+        "&image_type=photo"
+        "&per_page=50"
+    )
 
-    embed = discord.Embed(title=f"Image: {query}")
-    embed.set_image(url=url)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as r:
+            data = await r.json()
 
-    await ctx.send(embed=embed)
+            hits = data.get("hits", [])
+
+            if not hits:
+                await ctx.send("❌ No images found.")
+                return
+
+            img = hits[0]["largeImageURL"]
+
+            embed = discord.Embed(title=f"Image: {query}")
+            embed.set_image(url=img)
+
+            await ctx.send(embed=embed)
+
+
 # ---------- START ----------
 bot.run(TOKEN)
