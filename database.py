@@ -2,14 +2,18 @@ import sqlite3
 
 DB_NAME = "game.db"
 
+
 def get_connection():
-    return sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
 
 def init_db():
     conn = get_connection()
     c = conn.cursor()
 
-    # Users table
+    # ---------- USERS ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -19,34 +23,49 @@ def init_db():
         job_fired_count INTEGER DEFAULT 0,
         apartment_status TEXT DEFAULT 'owned',
         last_work_timestamp INTEGER DEFAULT 0,
-        work_streak INTEGER DEFAULT 0
+        created_at INTEGER DEFAULT (strftime('%s','now'))
     )
     """)
 
-    # Inventory table
+    # ---------- INVENTORY (FIXED DESIGN) ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS inventory (
-        id TEXT,
+        item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         item_name TEXT,
-        value INTEGER
+        value INTEGER,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )
     """)
 
-    # State table (inspection lock)
+    # ---------- STATE (INSPECTION SYSTEM) ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS state (
-        id TEXT PRIMARY KEY,
+        user_id TEXT PRIMARY KEY,
         is_in_inspection INTEGER DEFAULT 0,
-        inspection_end_time INTEGER DEFAULT 0
+        inspection_end_time INTEGER DEFAULT 0,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )
     """)
 
-    # Tax table
+    # ---------- TAX SYSTEM ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS taxes (
-        id TEXT PRIMARY KEY,
+        user_id TEXT PRIMARY KEY,
         last_paid INTEGER DEFAULT 0,
-        missed_payments INTEGER DEFAULT 0
+        missed_payments INTEGER DEFAULT 0,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+
+    # ---------- JOB HISTORY (NEW) ----------
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS job_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        job_name TEXT,
+        payout INTEGER,
+        timestamp INTEGER
     )
     """)
 
