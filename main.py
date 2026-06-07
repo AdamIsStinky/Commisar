@@ -1,5 +1,4 @@
 import os
-import random
 import aiohttp
 import discord
 from discord.ext import commands
@@ -12,15 +11,20 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
+# ---------- NSFW GUARD ----------
+def nsfw_only(ctx):
+    return ctx.channel.is_nsfw()
+
+
 # ---------- HELP ----------
 @bot.command()
 async def help(ctx):
     await ctx.send(
-        "**IMAGE BOT COMMANDS**\n"
-        "!image <query> - random image search\n"
-        "!cat - cat image\n"
-        "!dog - dog image\n"
-        "!meme - random meme"
+        "**IMAGE BOT**\n"
+        "!image <query> (NSFW channels only)\n"
+        "!cat\n"
+        "!dog\n"
+        "!meme"
     )
 
 
@@ -51,15 +55,19 @@ async def meme(ctx):
 
             embed = discord.Embed(title=data["title"])
             embed.set_image(url=data["url"])
-            embed.set_footer(text=f"r/{data['subreddit']}")
 
             await ctx.send(embed=embed)
 
 
-# ---------- GENERAL IMAGE SEARCH ----------
+# ---------- IMAGE SEARCH (NSFW-GATED) ----------
 @bot.command()
 async def image(ctx, *, query: str):
-    # Unsplash source (safe image API)
+
+    if not ctx.channel.is_nsfw():
+        await ctx.send("🔞 This command only works in NSFW-marked channels.")
+        return
+
+    # SAFE placeholder image source (replaceable later with compliant API)
     url = f"https://source.unsplash.com/800x600/?{query}"
 
     embed = discord.Embed(title=f"Image: {query}")
