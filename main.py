@@ -1,8 +1,5 @@
 import os
 import time
-import random
-import asyncio
-import statistics
 import discord
 from discord.ext import commands
 import database
@@ -11,36 +8,18 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
-# ---------- RANKS ----------
-ranks = [
-    ("citizen", 0),
-    ("worker", 20),
-    ("party_member", 50),
-    ("elite_member", 120),
-    ("ministry_official", 250),
-    ("leader", 500)
-]
+# ---------- CONFIG ----------
+BAD_WORDS = ["slur1", "slur2", "badword"]  # replace with real filters
 
+SPAM_WINDOW = 5  # seconds
+SPAM_LIMIT = 5
 
-# ---------- SHOP ----------
-shop_items = {
-    "chair": 10,
-    "radio": 25,
-    "tv": 60,
-    "luxury_vase": 120,
-    "gold_statue": 250
-}
-
-
-# ---------- BOT ----------
-class MyBot(commands.Bot):
-    async def setup_hook(self):
-        self.loop.create_task(inspection_loop())
-
-
-bot = MyBot(command_prefix="!", intents=intents)
+user_messages = {}  # user_id -> [timestamps]
 
 
 # ---------- INIT ----------
@@ -50,191 +29,121 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 
-# ---------- USER ----------
+# ---------- DB HELPERS ----------
 def ensure_user(user_id: str):
     conn = database.get_connection()
     c = conn.cursor()
 
     c.execute("INSERT OR IGNORE INTO users (id) VALUES (?)", (user_id,))
-    c.execute("INSERT OR IGNORE INTO state (user_id) VALUES (?)", (user_id,))
 
     conn.commit()
     conn.close()
 
 
-def get_rank(trust: int):
-    current = "citizen"
-    for r, req in ranks:
-        if trust >= req:
-            current = r
-    return current
-
-
-# ---------- INSPECTION (AUTO) ----------
-def run_inspection(user_id: str):
+def add_warn(user_id: str, reason: str):
     conn = database.get_connection()
     c = conn.cursor()
 
-    c.execute("SELECT money FROM users WHERE id = ?", (user_id,))
-    money = c.fetchone()[0]
-
-    c.execute("SELECT SUM(value) FROM inventory WHERE user_id = ?", (user_id,))
-    inv = c.fetchone()[0] or 0
-
-    total = money + inv
-
-    c.execute("SELECT money FROM users")
-    all_money = [r[0] for r in c.fetchall()]
-    target = statistics.median(all_money) if all_money else 50
-
-    confiscated = 0
-
-    if total > target:
-        confiscated = total - target
-
-        if money >= confiscated:
-            c.execute("UPDATE users SET money = money - ? WHERE id = ?", (confiscated, user_id))
-        else:
-            c.execute("UPDATE users SET money = 0 WHERE id = ?", (user_id,))
+    c.execute("UPDATE users SET warns = warns + 1 WHERE id = ?", (user_id,))
+    c.execute(
+        "INSERT INTO warn_log (user_id, reason, timestamp) VALUES (?, ?, ?)",
+        (user_id, reason, int(time.time()))
+    )
 
     conn.commit()
     conn.close()
 
-    return target, confiscated
+
+def get_warns(user_id: str):
+    conn = database.get_connection()
+    c = conn.cursor()
+
+    c.execute("SELECT warns FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+
+    conn.close()
+
+    return row[0] if row else 0
 
 
-async def inspection_loop():
-    await bot.wait_until_ready()
+# ---------- AUTOMOD CORE ----------
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
 
-    while not bot.is_closed():
-        await asyncio.sleep(random.randint(60 * 60 * 20, 60 * 60 * 24))  # daily-ish
+    user_id = str(message.author.id)
+    ensure_user(user_id)
 
-        conn = database.get_connection()
-        c = conn.cursor()
+    content = message.content.lower()
+    now = time.time()
 
-        c.execute("SELECT id FROM users")
-        users = c.fetchall()
+    # ---------- BAD WORD FILTER ----------
+    if any(word in content for word in BAD_WORDS):
+        await message.delete()
+        add_warn(user_id, "bad_word")
 
-        for (user_id,) in users:
-            c.execute("""
-                UPDATE state
-                SET is_in_inspection = 1,
-                    inspection_end_time = ?
-                WHERE user_id = ?
-            """, (time.time() + 300, user_id))
+        await message.channel.send(
+            f"{message.author.mention} Warning issued (bad language)."
+        )
 
-            conn.commit()
+    # ---------- SPAM DETECTION ----------
+    if user_id not in user_messages:
+        user_messages[user_id] = []
 
-            target, confiscated = run_inspection(user_id)
+    user_messages[user_id].append(now)
 
-            try:
-                user = await bot.fetch_user(int(user_id))
-                await user.send(
-                    f"🏠 DAILY INSPECTION\n"
-                    f"📊 Target: {int(target)}\n"
-                    f"💰 Confiscated: {confiscated}"
-                )
-            except:
-                pass
+    # keep only recent messages
+    user_messages[user_id] = [
+        t for t in user_messages[user_id]
+        if now - t <= SPAM_WINDOW
+    ]
 
-        conn.close()
+    if len(user_messages[user_id]) > SPAM_LIMIT:
+        await message.delete()
+        add_warn(user_id, "spam")
+
+        await message.channel.send(
+            f"{message.author.mention} Stop spamming."
+        )
+
+    await bot.process_commands(message)
 
 
-# ---------- COMMANDS ----------
+# ---------- WARN SYSTEM ----------
+@bot.command()
+async def warns(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    count = get_warns(str(member.id))
 
+    await ctx.send(f"⚠️ {member.name} has {count} warnings")
+
+
+# ---------- CLEAR WARN (ADMIN) ----------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clearwarns(ctx, member: discord.Member):
+    conn = database.get_connection()
+    c = conn.cursor()
+
+    c.execute("UPDATE users SET warns = 0 WHERE id = ?", (str(member.id),))
+
+    conn.commit()
+    conn.close()
+
+    await ctx.send(f"🧹 Cleared warnings for {member.name}")
+
+
+# ---------- HELP ----------
 @bot.command()
 async def help(ctx):
     await ctx.send(
-        "**COMMANDS**\n"
-        "!help - show commands\n"
-        "!info - game info\n"
-        "!work - earn money\n"
-        "!shop - view shop\n"
-        "!buy <item> - buy item"
+        "**AUTOMOD BOT**\n"
+        "!warns [user] - check warnings\n"
+        "!clearwarns @user - admin only\n"
+        "Auto: anti-spam + bad word filter"
     )
 
 
-@bot.command()
-async def info(ctx):
-    await ctx.send(
-        "🏛️ COMMUNIST SIMULATION GAME\n"
-        "Earn money, buy items, survive inspections.\n"
-        "Too rich = confiscation.\n"
-        "Too poor = struggle."
-    )
-
-
-@bot.command()
-async def work(ctx):
-    user_id = str(ctx.author.id)
-    ensure_user(user_id)
-
-    conn = database.get_connection()
-    c = conn.cursor()
-
-    c.execute("SELECT money, trust, job, last_work_timestamp FROM users WHERE id = ?", (user_id,))
-    money, trust, job, last_work = c.fetchone()
-
-    now = time.time()
-
-    if now - last_work < 5 * 60 * 60:
-        await ctx.send("⏳ Cooldown active")
-        return
-
-    reward = random.randint(10, 80)
-
-    c.execute("""
-        UPDATE users
-        SET money = money + ?,
-            last_work_timestamp = ?
-        WHERE id = ?
-    """, (reward, now, user_id))
-
-    conn.commit()
-    conn.close()
-
-    rank = get_rank(trust)
-
-    await ctx.send(f"💼 Worked → +{reward} | Rank: {rank}")
-
-
-@bot.command()
-async def shop(ctx):
-    msg = "**SHOP**\n"
-    for item, price in shop_items.items():
-        msg += f"{item} - {price}\n"
-    await ctx.send(msg)
-
-
-@bot.command()
-async def buy(ctx, item):
-    user_id = str(ctx.author.id)
-    ensure_user(user_id)
-
-    if item not in shop_items:
-        await ctx.send("❌ Item not found")
-        return
-
-    price = shop_items[item]
-
-    conn = database.get_connection()
-    c = conn.cursor()
-
-    c.execute("SELECT money FROM users WHERE id = ?", (user_id,))
-    money = c.fetchone()[0]
-
-    if money < price:
-        await ctx.send("💸 Not enough money")
-        return
-
-    c.execute("UPDATE users SET money = money - ? WHERE id = ?", (price, user_id))
-    c.execute("INSERT INTO inventory (user_id, item_name, value) VALUES (?, ?, ?)",
-              (user_id, item, price))
-
-    conn.commit()
-    conn.close()
-
-    await ctx.send(f"🛒 Bought {item}")
-
-
+# ---------- START ----------
 bot.run(TOKEN)
