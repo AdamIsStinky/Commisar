@@ -1,58 +1,80 @@
-#!/usr/bin/env python3
-"""
-Rule34 Discord Bot - Railway/GitHub Deploy
-Commands:
-  !rule34 <tags> [-count:N] [-exclude:tag1,tag2]
-"""
-
-import discord
-import aiohttp
-import asyncio
-import random
 import os
 import sys
-import json
-import xml.etree.ElementTree as ET
-from urllib.parse import urlencode
 
-# ========= CONFIGURATION =========
+# ====== DEBUG: Dump ALL env vars at startup ======
+print("=" * 60)
+print("STARTUP DEBUG - Environment Variables:")
+print(f"CWD: {os.getcwd()}")
+print(f"Files in CWD: {os.listdir('.')}")
+print()
+
+# Print every env var
+for key, value in sorted(os.environ.items()):
+    print(f"  ENV: {key}={value[:50] if value else '(empty)'}")
+
+print()
+print(f"DIRECT CHECK - os.environ.get('R34_API_KEY') = {repr(os.environ.get('R34_API_KEY'))}")
+print(f"DIRECT CHECK - os.environ.get('R34_USER_ID') = {repr(os.environ.get('R34_USER_ID'))}")
+print(f"DIRECT CHECK - os.environ.get('DISCORD_TOKEN') = {'SET' if os.environ.get('DISCORD_TOKEN') else 'NOT SET'}")
+print("=" * 60)
+# ================================================
+
+# Now set the values
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 R34_API_KEY = os.environ.get("R34_API_KEY", "")
 R34_USER_ID = os.environ.get("R34_USER_ID", "")
 
-# Print ALL environment variables for debugging (excluding sensitive ones)
-print("[DEBUG] ALL ENV VARS:")
-for key, val in sorted(os.environ.items()):
-    if key in ("DISCORD_TOKEN", "R34_API_KEY"):
-        print(f"  {key}={val[:10]}... (truncated)" if val else f"  {key}=(EMPTY)")
-    else:
-        print(f"  {key}={val}")
+# If env vars are empty, try reading from a .env file (fallback)
+if not R34_API_KEY or not R34_USER_ID:
+    env_file = os.path.join(os.getcwd(), ".env")
+    print(f"[INFO] Checking for .env file at: {env_file}")
+    if os.path.exists(env_file):
+        print("[INFO] .env file found! Reading it...")
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'\"")
+                    if key == "R34_API_KEY" and not R34_API_KEY:
+                        R34_API_KEY = val
+                        print(f"[INFO] Loaded R34_API_KEY from .env")
+                    elif key == "R34_USER_ID" and not R34_USER_ID:
+                        R34_USER_ID = val
+                        print(f"[INFO] Loaded R34_USER_ID from .env")
+                    elif key == "DISCORD_TOKEN" and not DISCORD_TOKEN:
+                        DISCORD_TOKEN = val
+                        print(f"[INFO] Loaded DISCORD_TOKEN from .env")
 
-print(f"[DEBUG] DISCORD_TOKEN set: {bool(DISCORD_TOKEN)}")
-print(f"[DEBUG] R34_API_KEY set: {bool(R34_API_KEY)}")
-print(f"[DEBUG] R34_USER_ID set: {bool(R34_USER_ID)}")
-print(f"[DEBUG] R34_USER_ID value: '{R34_USER_ID}'")
-print(f"[DEBUG] R34_API_KEY length: {len(R34_API_KEY)}")
+print(f"[INFO] FINAL VALUES:")
+print(f"  DISCORD_TOKEN: {'SET' if DISCORD_TOKEN else 'MISSING'}")
+print(f"  R34_API_KEY: {'SET (' + R34_API_KEY[:5] + '...)' if R34_API_KEY else 'MISSING'}")
+print(f"  R34_USER_ID: {R34_USER_ID if R34_USER_ID else 'MISSING'}")
 
 if not DISCORD_TOKEN:
-    print("[-] FATAL: DISCORD_TOKEN not set!")
+    print("FATAL: No Discord token found!")
     sys.exit(1)
 
 if not R34_API_KEY or not R34_USER_ID:
-    print("[-] WARNING: R34_API_KEY or R34_USER_ID not set!")
-    print("[-] The bot will start but API calls will fail!")
-    print("[-] Set them in Railway: Variables -> R34_API_KEY and R34_USER_ID")
-    # Don't crash — let the bot start so you can see logs
-    HAS_AUTH = False
-else:
-    HAS_AUTH = True
-    print(f"[+] R34 API auth configured (user_id: {R34_USER_ID})")
+    print("FATAL: R34_API_KEY or R34_USER_ID is empty!")
+    print("Set them either as Railway env vars or in a .env file in your repo root.")
+    print("Format: R34_API_KEY=yourkey R34_USER_ID=yourid")
+    sys.exit(1)
+
+# ====== REST OF BOT CODE ======
+import discord
+import aiohttp
+import asyncio
+import random
+import json
+import xml.etree.ElementTree as ET
+from urllib.parse import urlencode
 
 R34_API = "https://api.rule34.xxx/index.php"
 MAX_IMAGES = 15
 MIN_IMAGES = 1
 REQUEST_TIMEOUT = 30
-# =================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -64,7 +86,6 @@ def parse_rule34_args(text: str):
     include_tags = []
     exclude_tags = []
     count = 1
-
     for part in parts:
         if part.startswith("-count:") or part.startswith("-c:"):
             try:
@@ -82,7 +103,6 @@ def parse_rule34_args(text: str):
             exclude_tags.append(part[1:])
         else:
             include_tags.append(part)
-
     return include_tags, exclude_tags, count
 
 
@@ -100,9 +120,6 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
     valid_urls = []
     limit = min(100, count * 5)
 
-    if not HAS_AUTH:
-        return None, "Rule34 API credentials not configured. Set R34_API_KEY and R34_USER_ID in Railway variables."
-
     params = {
         "page": "dapi",
         "s": "post",
@@ -114,9 +131,7 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
         "user_id": R34_USER_ID,
     }
 
-    print(f"[DEBUG] Request URL: {R34_API}")
-    print(f"[DEBUG] Params: page=dapi, s=post, q=index, tags='{params['tags']}', limit={limit}")
-    print(f"[DEBUG] Auth: api_key={'***' + R34_API_KEY[-4:] if R34_API_KEY else 'NONE'}, user_id={R34_USER_ID}")
+    print(f"[DEBUG] API request: tags='{params['tags']}' user_id={R34_USER_ID} key_len={len(R34_API_KEY)}")
 
     try:
         async with session.get(
@@ -125,23 +140,16 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
             text = await resp.text()
             text = text.strip()
 
-            print(f"[DEBUG] Response status: {resp.status}")
-            print(f"[DEBUG] Response headers: {dict(resp.headers)}")
-            print(f"[DEBUG] Response body (first 300 chars): {text[:300]}")
+            print(f"[DEBUG] API response status: {resp.status}")
+            print(f"[DEBUG] API response: {text[:200]}")
 
             if resp.status != 200:
                 return None, f"API returned HTTP {resp.status}"
-
             if "Missing authentication" in text:
-                return None, "API rejected auth. Your API key or user_id may be wrong. Generate a new one at https://rule34.xxx/index.php?page=account&s=options"
+                return None, f"Auth rejected! Check your R34_API_KEY and R34_USER_ID"
 
-            # Try JSON
             if text.startswith("[") or text.startswith("{"):
-                try:
-                    data = json.loads(text)
-                except json.JSONDecodeError as e:
-                    return None, f"Bad JSON response: {e}"
-
+                data = json.loads(text)
                 if isinstance(data, dict):
                     posts_data = data.get("posts", [])
                     if isinstance(posts_data, dict):
@@ -150,10 +158,8 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                         posts_list = posts_data
                 else:
                     posts_list = data
-
                 if not posts_list:
-                    return None, "No posts found for those tags."
-
+                    return None, "No posts found."
                 for post in posts_list:
                     if isinstance(post, dict) and "@attributes" in post:
                         post = post["@attributes"]
@@ -166,12 +172,7 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                     if len(valid_urls) >= count:
                         break
             else:
-                # Try XML
-                try:
-                    root = ET.fromstring(text)
-                except ET.ParseError:
-                    return None, f"API returned: {text[:200]}"
-
+                root = ET.fromstring(text)
                 for post in root.iter("post"):
                     file_url = post.get("file_url", "")
                     if not file_url:
@@ -183,42 +184,35 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                         break
 
         if not valid_urls:
-            return None, f"No static images found for tags: {' '.join(include_tags)}."
-
+            return None, f"No images found for: {' '.join(include_tags)}."
         random.shuffle(valid_urls)
         return valid_urls[:count], None
-
     except asyncio.TimeoutError:
         return None, "Request timed out."
     except Exception as e:
-        print(f"[DEBUG] Exception: {type(e).__name__}: {e}")
+        print(f"[DEBUG] Exception: {e}")
         return None, f"Error: {str(e)}"
 
 
 @bot.event
 async def on_ready():
-    print(f"[+] Logged in as {bot.user}")
-    print(f"[+] Bot ready! Connected to Discord.")
+    print(f"[+] Bot logged in as {bot.user}")
+    print(f"[+] Bot is ready!")
 
 
 @bot.event
-async def on_message(message: discord.Message):
+async def on_message(message):
     if message.author == bot.user:
         return
     if not message.content.startswith("!rule34"):
         return
 
     args_text = message.content[len("!rule34"):].strip()
-
     if not args_text:
-        await message.channel.send(
-            "Usage: `!rule34 <tags> [-count:N] [-exclude:tag1,tag2]`\n"
-            "Example: `!rule34 naruto -count:5 -exclude:guro`"
-        )
+        await message.channel.send("Usage: `!rule34 <tags> [-count:N] [-exclude:tag1,tag2]`")
         return
 
     include_tags, exclude_tags, count = parse_rule34_args(args_text)
-
     if not include_tags:
         await message.channel.send("Please provide at least one tag!")
         return
@@ -226,7 +220,7 @@ async def on_message(message: discord.Message):
     status_msg = await message.channel.send(
         f"Searching for `{' '.join(include_tags)}`"
         + (f" (excluding: {', '.join(exclude_tags)})" if exclude_tags else "")
-        + f" — fetching {count} image(s)..."
+        + f" — {count} image(s)..."
     )
 
     async with aiohttp.ClientSession() as session:
@@ -240,9 +234,7 @@ async def on_message(message: discord.Message):
         await status_msg.edit(content=f"Here's your image for `{' '.join(include_tags)}`:")
         await message.channel.send(urls[0])
     else:
-        await status_msg.edit(
-            content=f"Found {len(urls)} image(s) for `{' '.join(include_tags)}`:"
-        )
+        await status_msg.edit(content=f"Found {len(urls)} image(s):")
         for i, url in enumerate(urls, 1):
             await message.channel.send(f"**{i}.** {url}")
             await asyncio.sleep(0.3)
