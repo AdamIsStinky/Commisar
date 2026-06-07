@@ -27,7 +27,7 @@ def init_db():
     )
     """)
 
-    # ---------- INVENTORY (FIXED DESIGN) ----------
+    # ---------- INVENTORY ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS inventory (
         item_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +38,7 @@ def init_db():
     )
     """)
 
-    # ---------- STATE (INSPECTION SYSTEM) ----------
+    # ---------- STATE (INSPECTION) ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS state (
         user_id TEXT PRIMARY KEY,
@@ -48,7 +48,7 @@ def init_db():
     )
     """)
 
-    # ---------- TAX SYSTEM ----------
+    # ---------- TAXES ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS taxes (
         user_id TEXT PRIMARY KEY,
@@ -58,7 +58,7 @@ def init_db():
     )
     """)
 
-    # ---------- JOB HISTORY (NEW) ----------
+    # ---------- JOB HISTORY ----------
     c.execute("""
     CREATE TABLE IF NOT EXISTS job_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
