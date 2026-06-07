@@ -20,6 +20,9 @@ import xml.etree.ElementTree as ET
 
 # ========= CONFIGURATION =========
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+R34_API_KEY = os.environ.get("R34_API_KEY", "")
+R34_USER_ID = os.environ.get("R34_USER_ID", "")
+
 if not DISCORD_TOKEN:
     print("[-] ERROR: DISCORD_TOKEN environment variable not set!")
     sys.exit(1)
@@ -64,7 +67,7 @@ def parse_rule34_args(text: str):
 
 
 def build_tags_string(include_tags: list, exclude_tags: list) -> str:
-    """Build the Rule34 API tags string with + for AND and - for exclude."""
+    """Build the Rule34 API tags string."""
     tags = []
     for tag in include_tags:
         tags.append(tag.replace(" ", "_"))
@@ -74,15 +77,10 @@ def build_tags_string(include_tags: list, exclude_tags: list) -> str:
 
 
 async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclude_tags: list, count: int):
-    """
-    Fetch posts from Rule34 API.
-    The API returns XML by default - we parse that.
-    Falls back to JSON if available.
-    """
+    """Fetch posts from the Rule34 API."""
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     valid_urls = []
 
-    # We request extras to account for non-image results
     limit = min(100, count * 5)
 
     params = {
@@ -91,7 +89,13 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
         "q": "index",
         "tags": build_tags_string(include_tags, exclude_tags),
         "limit": str(limit),
+        "json": "1",
     }
+
+    # Add API key auth if configured
+    if R34_API_KEY and R34_USER_ID:
+        params["api_key"] = R34_API_KEY
+        params["user_id"] = R34_USER_ID
 
     try:
         async with session.get(
@@ -100,14 +104,31 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
             if resp.status != 200:
                 return None, f"API returned HTTP {resp.status}"
 
-            content_type = resp.headers.get("Content-Type", "")
+            text = await resp.text()
+            text = text.strip()
 
-            # Try JSON first if the API sends it
-            if "json" in content_type:
-                data = await resp.json()
-                if not data:
+            # If the response is a JSON string (starts with [ or {)
+            if text.startswith("[") or text.startswith("{"):
+                import json
+                data = json.loads(text)
+                
+                # Handle {"posts": [...]} wrapper or plain array
+                if isinstance(data, dict):
+                    posts_list = data.get("posts", [])
+                    # Some responses have posts.post (nested)
+                    if isinstance(posts_list, dict) and "post" in posts_list:
+                        posts_list = posts_list["post"]
+                else:
+                    posts_list = data
+
+                if not posts_list:
                     return None, "No results found for those tags."
-                for post in data:
+
+                for post in posts_list:
+                    # Handle both direct dict and @attributes wrapping
+                    if isinstance(post, dict) and "@attributes" in post:
+                        post = post["@attributes"]
+                    
                     file_url = post.get("file_url", "")
                     if not file_url:
                         continue
@@ -117,11 +138,9 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                     if len(valid_urls) >= count:
                         break
             else:
-                # Parse XML response
-                text = await resp.text()
+                # Parse XML
                 root = ET.fromstring(text)
-
-                for post in root.findall("post"):
+                for post in root.iter("post"):
                     file_url = post.get("file_url", "")
                     if not file_url:
                         continue
@@ -132,7 +151,7 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
                         break
 
         if not valid_urls:
-            return None, "No static images found for those tags (try different tags)."
+            return None, f"No static images found for tags: {' '.join(include_tags)}. Try different tags."
 
         random.shuffle(valid_urls)
         return valid_urls[:count], None
@@ -148,6 +167,10 @@ async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclud
 @bot.event
 async def on_ready():
     print(f"[+] Logged in as {bot.user} (ID: {bot.user.id})")
+    if R34_API_KEY and R34_USER_ID:
+        print("[+] Rule34 API key configured")
+    else:
+        print("[!] No Rule34 API key set - set R34_API_KEY and R34_USER_ID env vars if needed")
     print("[+] Bot is ready!")
 
 
@@ -199,7 +222,7 @@ async def on_message(message: discord.Message):
         )
         for i, url in enumerate(urls, 1):
             await message.channel.send(f"**{i}.** {url}")
-            await asyncio.sleep(0.3)
+            await asyncio.sync.sleep(0.3)
 
 
 if __name__ == "__main__":
