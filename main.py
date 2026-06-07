@@ -8,10 +8,6 @@ Commands:
   -count:N : number of images to send (1-15, default 1)
   -exclude:tag1,tag2 : tags to exclude
   -<tag> : alternative way to exclude a single tag
-
-Example:
-  !rule34 naruto -count:5 -exclude:guro,scat
-  !rule34 sonic -female -count:3
 """
 
 import discord
@@ -20,13 +16,12 @@ import asyncio
 import random
 import os
 import sys
+import xml.etree.ElementTree as ET
 
 # ========= CONFIGURATION =========
-# Read token from environment variable (Railway sets these)
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     print("[-] ERROR: DISCORD_TOKEN environment variable not set!")
-    print("[-] Set it in Railway dashboard -> Variables")
     sys.exit(1)
 
 R34_API = "https://api.rule34.xxx/index.php"
@@ -41,71 +36,62 @@ bot = discord.Client(intents=intents)
 
 
 def parse_rule34_args(text: str):
-    """
-    Parse the !rule34 command arguments.
-    Returns (include_tags, exclude_tags, count)
-    """
+    """Parse !rule34 command arguments. Returns (include_tags, exclude_tags, count)"""
     parts = text.strip().split()
     include_tags = []
     exclude_tags = []
     count = 1
 
     for part in parts:
-        # Check for -count:N syntax
         if part.startswith("-count:") or part.startswith("-c:"):
             try:
                 val = int(part.split(":", 1)[1])
                 count = max(MIN_IMAGES, min(MAX_IMAGES, val))
             except (ValueError, IndexError):
                 pass
-        # Check for -exclude:tag1,tag2 or -e:tag1,tag2 syntax
         elif part.startswith("-exclude:") or part.startswith("-e:"):
             tags_str = part.split(":", 1)[1]
             for tag in tags_str.split(","):
                 tag = tag.strip()
                 if tag:
                     exclude_tags.append(tag)
-        # Single-tag exclusion with -tag
-        elif part.startswith("-") and len(part) > 1 and not part.startswith("--"):
+        elif part.startswith("-") and len(part) > 1:
             exclude_tags.append(part[1:])
-        # Regular include tag
         else:
             include_tags.append(part)
 
     return include_tags, exclude_tags, count
 
 
-def build_api_params(include_tags: list, exclude_tags: list, count: int):
-    """
-    Build the API query parameters.
-    Rule34 uses space for AND tags. Excluded tags use '-tag' syntax.
-    """
+def build_tags_string(include_tags: list, exclude_tags: list) -> str:
+    """Build the Rule34 API tags string with + for AND and - for exclude."""
     tags = []
     for tag in include_tags:
         tags.append(tag.replace(" ", "_"))
     for tag in exclude_tags:
         tags.append(f"-{tag.replace(' ', '_')}")
-
-    tags_str = " ".join(tags)
-    limit = min(100, count * 3)
-
-    return {
-        "page": "dapi",
-        "s": "post",
-        "q": "index",
-        "tags": tags_str,
-        "limit": limit,
-        "json": 1,
-    }
+    return " ".join(tags)
 
 
-async def fetch_posts(session: aiohttp.ClientSession, params: dict, count: int):
+async def fetch_posts(session: aiohttp.ClientSession, include_tags: list, exclude_tags: list, count: int):
     """
-    Fetch posts from the Rule34 API. Returns up to 'count' valid image URLs.
-    Filters to only static images (jpg, png, gif, webp).
+    Fetch posts from Rule34 API.
+    The API returns XML by default - we parse that.
+    Falls back to JSON if available.
     """
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     valid_urls = []
+
+    # We request extras to account for non-image results
+    limit = min(100, count * 5)
+
+    params = {
+        "page": "dapi",
+        "s": "post",
+        "q": "index",
+        "tags": build_tags_string(include_tags, exclude_tags),
+        "limit": str(limit),
+    }
 
     try:
         async with session.get(
@@ -114,22 +100,36 @@ async def fetch_posts(session: aiohttp.ClientSession, params: dict, count: int):
             if resp.status != 200:
                 return None, f"API returned HTTP {resp.status}"
 
-            data = await resp.json()
+            content_type = resp.headers.get("Content-Type", "")
 
-            if not data:
-                return None, "No results found for those tags."
+            # Try JSON first if the API sends it
+            if "json" in content_type:
+                data = await resp.json()
+                if not data:
+                    return None, "No results found for those tags."
+                for post in data:
+                    file_url = post.get("file_url", "")
+                    if not file_url:
+                        continue
+                    ext = f".{file_url.rsplit('.', 1)[-1].lower()}"
+                    if ext in image_extensions:
+                        valid_urls.append(file_url)
+                    if len(valid_urls) >= count:
+                        break
+            else:
+                # Parse XML response
+                text = await resp.text()
+                root = ET.fromstring(text)
 
-            for post in data:
-                file_url = post.get("file_url", "")
-                if not file_url:
-                    continue
-
-                ext = f".{file_url.rsplit('.', 1)[-1].lower()}"
-                if ext in image_extensions:
-                    valid_urls.append(file_url)
-
-                if len(valid_urls) >= count:
-                    break
+                for post in root.findall("post"):
+                    file_url = post.get("file_url", "")
+                    if not file_url:
+                        continue
+                    ext = f".{file_url.rsplit('.', 1)[-1].lower()}"
+                    if ext in image_extensions:
+                        valid_urls.append(file_url)
+                    if len(valid_urls) >= count:
+                        break
 
         if not valid_urls:
             return None, "No static images found for those tags (try different tags)."
@@ -137,6 +137,8 @@ async def fetch_posts(session: aiohttp.ClientSession, params: dict, count: int):
         random.shuffle(valid_urls)
         return valid_urls[:count], None
 
+    except ET.ParseError as e:
+        return None, f"Failed to parse API response: {e}"
     except asyncio.TimeoutError:
         return None, "Request timed out. Try again or use fewer tags."
     except Exception as e:
@@ -177,13 +179,12 @@ async def on_message(message: discord.Message):
 
     status_msg = await message.channel.send(
         f"Searching for `{' '.join(include_tags)}`"
-        f"{f' (excluding: {', '.join(exclude_tags)})' if exclude_tags else ''}"
-        f" — fetching {count} image(s)..."
+        + (f" (excluding: {', '.join(exclude_tags)})" if exclude_tags else "")
+        + f" — fetching {count} image(s)..."
     )
 
     async with aiohttp.ClientSession() as session:
-        params = build_api_params(include_tags, exclude_tags, count)
-        urls, error = await fetch_posts(session, params, count)
+        urls, error = await fetch_posts(session, include_tags, exclude_tags, count)
 
     if error:
         await status_msg.edit(content=f"Error: {error}")
