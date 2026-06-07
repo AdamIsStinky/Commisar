@@ -67,14 +67,12 @@ async def image(ctx, *, query: str):
         await ctx.send("🔞 This command only works in NSFW-marked channels.")
         return
 
-    # SAFE placeholder image source (replaceable later with compliant API)
-    url = f"https://source.unsplash.com/800x600/?{query}"
+    # Picsum gives real direct images (no redirects)
+    url = f"https://picsum.photos/seed/{query}/{800}/{600}"
 
     embed = discord.Embed(title=f"Image: {query}")
     embed.set_image(url=url)
 
     await ctx.send(embed=embed)
-
-
 # ---------- START ----------
 bot.run(TOKEN)
