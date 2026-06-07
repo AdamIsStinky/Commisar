@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import discord
 from discord.ext import commands
 import database
@@ -10,6 +11,15 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+# ---------- JOBS ----------
+
+jobs = {
+    "factory_worker": {"min": 10, "max": 30, "trust_req": 0},
+    "office_clerk": {"min": 25, "max": 60, "trust_req": 40},
+    "state_agent": {"min": 50, "max": 120, "trust_req": 80}
+}
 
 
 # ---------- USER SETUP ----------
@@ -28,6 +38,17 @@ def ensure_user(user_id: str):
 
     conn.commit()
     conn.close()
+
+
+def get_user(user_id: str):
+    conn = database.get_connection()
+    c = conn.cursor()
+
+    c.execute("SELECT money, trust, job, last_work_timestamp FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+
+    conn.close()
+    return row
 
 
 # ---------- INSPECTION SYSTEM ----------
@@ -101,15 +122,13 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 
-# ---------- TEST COMMAND ----------
+# ---------- COMMANDS ----------
 
 @bot.command()
 async def ping(ctx):
     ensure_user(str(ctx.author.id))
     await ctx.send("Pong! 🏓 User registered.")
 
-
-# ---------- TEST INSPECTION COMMAND ----------
 
 @bot.command()
 async def inspect(ctx):
@@ -124,12 +143,56 @@ async def inspect(ctx):
         SET is_in_inspection = 1,
             inspection_end_time = ?
         WHERE id = ?
-    """, (time.time() + 300, user_id))  # 5 minutes
+    """, (time.time() + 300, user_id))
 
     conn.commit()
     conn.close()
 
     await ctx.send("🔍 Inspection started. Commands locked for 5 minutes.")
+
+
+@bot.command()
+async def work(ctx):
+    user_id = str(ctx.author.id)
+    ensure_user(user_id)
+
+    money, trust, job, last_work = get_user(user_id)
+
+    now = time.time()
+
+    # 5 hour cooldown
+    if now - last_work < 5 * 60 * 60:
+        remaining = int((5 * 60 * 60) - (now - last_work))
+        await ctx.send(f"⏳ You are tired. Try again in {remaining // 60} minutes.")
+        return
+
+    available_jobs = [
+        j for j, data in jobs.items()
+        if trust >= data["trust_req"]
+    ]
+
+    if not available_jobs:
+        await ctx.send("🚫 You are unemployable.")
+        return
+
+    chosen = random.choice(available_jobs)
+    payout = random.randint(jobs[chosen]["min"], jobs[chosen]["max"])
+
+    conn = database.get_connection()
+    c = conn.cursor()
+
+    c.execute("""
+        UPDATE users
+        SET money = money + ?,
+            job = ?,
+            last_work_timestamp = ?
+        WHERE id = ?
+    """, (payout, chosen, now, user_id))
+
+    conn.commit()
+    conn.close()
+
+    await ctx.send(f"💼 You worked as **{chosen}** and earned **{payout} credits**.")
 
 
 # ---------- START BACKGROUND TASK ----------
